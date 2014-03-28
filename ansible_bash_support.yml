@@ -1,0 +1,7 @@
+#===================================================================================================
+#  Playbook to manually install the ansible_bash_functions helper script in
+#  /usr/local/libexec. Normally, this should be done through roles.
+#===================================================================================================
+- hosts: all
+  tasks:
+   - include: tasks/main.yml

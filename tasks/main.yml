@@ -1,0 +1,12 @@
+#===================================================================================================
+#
+#  Install bash helper script in /usr/local/libexec (this task is designed to be included as a role).
+#
+#===================================================================================================
+
+- name: "Install bash modules helper script"
+  copy: src=ansible_bash_functions
+        dest=/usr/local/libexec/ansible_bash_functions
+        owner=root
+        group=root
+        mode=775

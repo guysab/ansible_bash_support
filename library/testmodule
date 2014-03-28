@@ -1,0 +1,24 @@
+#!/bin/bash
+#===================================================================================================
+#
+#  This is a sample bash ansible module to demonstrate bash support improvements. It simply installs
+#  a string in /etc/public_string.
+#
+#===================================================================================================
+
+#--- Insert this tag to tell ansible we also support check mode ---
+#<<ANSIBLE_MODULE_SUPPORTS_CHECKMODE>>
+
+#--- Source the bash helper script and parse the module's arguments ("string" and "CHECKMODE") for us ---
+source /usr/local/libexec/ansible_bash_functions "$1" --args "string CHECKMODE"
+
+#--- Test if /etc/public_string needs to be changed (idempotence) ---
+if [ "`cat /etc/public_string`" != "$string" ]; then
+        #--- If we're in --check mode, don't do anything, just report the fact ---
+        [ -n "$CHECKMODE" ] && ansible_return changed:true msg="Public string needs to be changed"
+        #--- Otherwise make the change and return success ---
+        echo "$string" > /etc/public_string
+        ansible_return changed:true msg="Public string changed"
+fi
+#--- Otherwise, everything's already good ---
+ansible_return changed:false msg="Public string already OK"

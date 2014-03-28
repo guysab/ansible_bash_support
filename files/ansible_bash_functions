@@ -1,0 +1,228 @@
+#!/bin/bash
+#===================================================================================================
+#
+#		ansible_bash_functions - Helper script for bash ansible modules
+#
+#---------------------------------------------------------------------------------------------------
+#
+#  This script helps ansible modules written in bash. It will:
+#
+#	- Validate and parse ansible module parameters into bash environment variables.
+#	- Capture stdout and stderr output.
+#       - Intercept script errors and return the failure to ansible with an explanatory message.
+#	- Format and return results in JSON-compliant format.
+#
+#  USAGE
+#
+#       Have the ansible_bash_functions helper script installed in /usr/local/libexec with a
+#       playbook and then source the script at the beginning of your module as follows:
+#
+#	    source "/usr/local/libexec/ansible_bash_functions`" "$1" --args "<allowed_arguments...>"
+#
+#       where <allowed_arguments> is a space-delimited list of argument keywords that are supported
+#       by the ansible module.  If unknown arguments are passed to the module by the playbook, an
+#       error is returned to ansible. Add the keyword '...' to accept positionnal arguments. All
+#       values are returned in the corresponding environment variables (positionnal arguments are
+#       returned in $1, $2, etc).
+#
+#       EXAMPLE:  source "/usr/local/libexec//ansible_bash_functions" "$1" \
+#		         --args "file contents owner group mode"
+#
+#             This will initialize the ansible module and parse the module arguments 'file=',
+#             'contents=', 'owner=', 'group=' and 'mode=' into the corresponding bash environment
+#             variables. If unknown name/value pairs are passed to the module, an error is returned
+#             to ansible. All stdout/stderr written by the script afterwards is captured by the
+#             helper script and returned to ansible in JSON format when the module ends. Script
+#             errors are also automatically trapped and cause the module to return immediately with
+#             an explanatory message.  To allow the script to continue even if a command fails,
+#             enclose the command in an if statement, in a pipe, or add a test (see bash manpage
+#             under TRAP ERR to understand when errors are trapped or not). A shorthand way to
+#             bypass error trapping is to add an or/nop after the command, for example:
+#
+#                        rm "file_may_not_exist" || :
+#
+#  RETURNING JSON RESPONSE
+#
+#       When the module is done, call ansible_return with the following arguments to return values
+#       to ansible:
+#                       
+#	     ansible_return [ name:rawvalue | name="value" | var ] ... ]
+#
+#       This will format the arguments in JSON-compliant format and return it to ansible along with
+#       any stdout/stderr output already captured. Use the argument format 'name:rawvalue' to return
+#       the the specified name and value pair exactly as is (for example, to return a boolean),
+#       name="value" to return the specified bash value as a JSON string (use bash quoting rules,
+#       the helper script will convert it to JSON as appropriate), or simply 'var' to extract and
+#       return the value of an existing environment variable.
+#
+#       EXAMPLE:   string1="This string wll be returned to ansible"
+#		   ansible_return failed:false msg="File altered" string1
+#
+#             will return the following to ansible:
+#                  '{"failed": false, "status": 0, "msg": "File altered", "string1": "This
+#                  string will be returned to ansible"}'
+#
+#---------------------------------------------------------------------------------------------------
+#% 2013-10-02 Created. [Guy Sabourin]
+#===================================================================================================
+
+#--- json_escape_string() - Format a string value according to JSON syntax (no unicode for now) ---
+function json_escape_string() {
+	sed -E '$!N; s/(["\\\/])/\\\1/g; s/\'$'\b''/\\b/g; s/\n/\\n/g; s/\'$'\t''/\\t/g; s/\'$'\f''/\\f/g; s/\'$'\r''/\\r/g' <<<"$*" | tr -d '\n'
+}
+
+#--- json_unescape_string() - Convert a JSON string (without quotes) to native bash format ---
+function json_unescape_string() {
+	sed -E 's/\\"/"/g; s#\\/#/#g; s/\\b/'$'\b''/; s/\\n/\'$'\n''/g; s/\\t/\'$'\t''/g; s/\\f/\'$'\f''/g; s/\\r/\'$'\r''/g; s/\\\\/\\/g' <<<"$*"
+}
+
+#--- json_response() - Prepare a json response ---
+function json_response() {
+	local var
+	local sep=''
+	echo -n "{"
+	#--- Print each argument to ansible_return() as a JSON element ---
+	for var in "$@"; do
+		#--- var=value : String value supplied inline, escape string for JSON  ---
+		if [[ "$var" =~ ^([^=]*)=(.*)$ ]]; then
+			echo -n "$sep\"${BASH_REMATCH[1]}\": \"`json_escape_string "${BASH_REMATCH[2]}"`\""
+		#--- var:value : Raw JSON value supplied inline, don't escape ---
+		elif [[ "$var" =~ ^([^:]*):(.*)$ ]]; then
+			echo -n "$sep\"${BASH_REMATCH[1]}\": ${BASH_REMATCH[2]}"
+		#--- var : String value is to be obtained from bash environment variables ---
+		else
+			echo -n "$sep\"$var\": \"`json_escape_string "${!var}"`\""
+		fi
+		#--- Add a seperator for subsequent elements ---
+		sep=', '
+	done
+	#--- Close JSON reponse ---
+	echo "}"
+}
+
+#--- ansible_return() - Return response to ansible ---
+function ansible_return() {
+	#--- Cancel exit trap ---
+	trap - EXIT
+	#--- Close stdout/stderr capture ---
+	local _extravars=''
+	if [ -n "$ANSIBLE_ARGUMENTS_FILE" ]; then
+		#--- Close logs and restore original stdout/stderr filedes ---
+		exec 1>&'11'-
+		exec 2>&'12'-
+		#--- Get stdout and stderr contents ---
+		local stdout="`cat "$ANSIBLE_STDOUT"`"
+		local stderr="`cat "$ANSIBLE_STDERR"`"
+		#--- Delete stdout and stderr temporary files ---
+		rm "$ANSIBLE_STDOUT" "$ANSIBLE_STDERR"
+		#--- Add stdout/stderr variables to JSON response if applicable ---
+		[ -n "$stdout" ] && _extravars+=" stdout"
+		[ -n "$stderr" ] && _extravars+=" stderr"
+	fi
+	#--- Return response to ansible ---
+        json_response "$@" $_extravars
+	exit 0
+}
+
+#--- Trap bash errors and uncontrolled exits ---
+trap 'ansible_return failed:true rc:$? msg="module ${BASH_SOURCE[0]##*/} ended with errors, err=$?" command="$BASH_COMMAND" source="${BASH_SOURCE[0]}" lineno:$LINENO' ERR EXIT
+
+#--- Get ansible module arguments ---
+if [ -e "$1" ]; then
+	#--- Arguents supplied in a file ---
+	ANSIBLE_ARGUMENTS_FILE="$1"
+	_args="`cat "$1"`"
+        shift
+else
+	#--- Arguments supplied in-line (local testing) ---
+	ANSIBLE_ARGUMENTS_FILE=''
+	_args="$1"
+        shift
+fi
+
+#--- Parse bash arguments ---
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--args)	_allowed_args="$2"; shift; shift ;;
+		*) ansible_return failed:true msg="Invalid argument '$1' to ansible_bash_functions";;
+	esac
+done
+
+#--- Capture stdout and stderr output (unless in local testing) ---
+if [ -n "$ANSIBLE_ARGUMENTS_FILE" ]; then
+	#--- Preserve original stdout and stderr filedes ---
+	exec 11>&1
+	exec 12>&1
+	#--- Redirect stdout/stderr to temporary files ---
+	ANSIBLE_STDOUT=/tmp/ansible_module_$$.stdout
+	ANSIBLE_STDERR=/tmp/ansible_module_$$.stderr
+	exec 1>"$ANSIBLE_STDOUT"
+	exec 2>"$ANSIBLE_STDERR"
+fi
+
+#--- Parse ansible module arguments ---
+ARGN=()	#--- Names
+ARGV=() #--- Values
+ARGS=() #--- Positionnal arguments
+while [ -n "$_args" ]; do
+	#--- Extract next argument, ignore leading and trailing spaces ---
+	if [[ "$_args" =~ ^[' ']*([^ =]+)=(.*)[' ']*$ ]]; then
+		#--- Keyword argument ---
+		_var="${BASH_REMATCH[1]}"
+		_args="${BASH_REMATCH[2]}"
+	else
+		#--- Positionnal argument ---
+		_var=''
+		[[ "$_args" =~ ^[' ']*(.*)$ ]]
+		_args="${BASH_REMATCH[1]}"
+	fi
+	#--- Parse quoted argument ---
+	if [ "${_args:0:1}" = '"' ]; then
+		_value=''
+		_args="${_args:1}"
+		#--- Repeat parsing until closing quote ---
+		while :; do
+			#--- Get closing quote ---
+			if [[ "$_args" =~ ^([^'"']*)'"'(.*)$ ]]; then
+				#--- Accumulate value ---
+				_value+="${BASH_REMATCH[1]}"
+				_args="${BASH_REMATCH[2]}"
+				#--- Stop parsing if quote is a real closure ---
+				[ "${_value:((-1))}" != '\' -o "${_value:((-2))}" == '\\' ] && break
+				#--- Otherwise, append quote as part of value and continue parsin ---
+				_value+='"'
+			#--- No quote closure, this is bad ---
+			else
+				echo "Module parameters parse failed for '$_var=' near '$_args'" >&2
+				exit 1
+			fi
+		done
+	#--- Parse unquoted argument ---
+	elif [[ "$_args" =~ ^([^ ]*)' '(.*)$ ]]; then
+		_value="${BASH_REMATCH[1]}"
+		_args="${BASH_REMATCH[2]}"
+	#--- Otherwise, this is the last argument ---
+	else
+		_value="$_args"
+		_args=''
+	fi
+	#--- Process positional argument ---
+	if [ -z "$_var" ]; then
+		#--- Allow only if caller supports positionnals ---
+		if [[ ! " $_allowed_args " =~ ' ... ' ]]; then
+			ansible_return failed:true msg="Non-keyword arguments not supported by this module: '$ARGS'"
+		fi
+		#--- Accumulate positional argument in ARGS[] ---
+		ARGS+=("$_value")
+	#--- Process supported keyword argument ---
+	elif [[ " $_allowed_args " =~ " $_var " ]]; then
+		#--- Set corresponding environment variable ---
+		declare "$_var"="`json_unescape_string "$_value"`"
+		#--- Accumulate keyword argument in ARGN[] and ARGV[] ---
+		ARGN+=("$_var")
+		ARGV+=("$_value")
+	#--- Otherwise, keyword argument not supported by module! ---
+	else
+		ansible_return failed:true msg="Unsupported argument '$_var='"
+	fi
+done

@@ -1,0 +1,110 @@
+#===================================================================================================
+#
+#   Proposed patches to ansible to support check mode in old-style modules (including bash)
+#
+#===================================================================================================
+diff --git a/hacking/test-module b/hacking/test-module
+index 3f7a8a2..ea8a9d6 100755
+--- a/hacking/test-module
++++ b/hacking/test-module
+@@ -105,7 +105,7 @@ def boilerplate_module(modfile, args, interpreter):
+         if not interpreter_type.endswith('_interpreter'):
+             interpreter_type = '%s_interpreter' % interpreter_type
+         inject[interpreter_type] = interpreter_path
+-    (module_data, module_style, shebang) = replacer.modify_module(
++    (module_data, module_style, shebang, module_checkable) = replacer.modify_module(
+         modfile, 
+         complex_args,
+         args,
+diff --git a/lib/ansible/module_common.py b/lib/ansible/module_common.py
+index da02882..5e7612e 100644
+--- a/lib/ansible/module_common.py
++++ b/lib/ansible/module_common.py
+@@ -30,6 +30,7 @@ REPLACER = "#<<INCLUDE_ANSIBLE_MODULE_COMMON>>"
+ REPLACER_ARGS = "\"<<INCLUDE_ANSIBLE_MODULE_ARGS>>\""
+ REPLACER_LANG = "\"<<INCLUDE_ANSIBLE_MODULE_LANG>>\""
+ REPLACER_COMPLEX = "\"<<INCLUDE_ANSIBLE_MODULE_COMPLEX_ARGS>>\""
++REPLACER_SUPPORTS_CHECKMODE = "#<<ANSIBLE_MODULE_SUPPORTS_CHECKMODE>>"
+ 
+ class ModuleReplacer(object):
+ 
+@@ -82,6 +83,7 @@ class ModuleReplacer(object):
+         """
+ 
+         module_style = 'old'
++        module_checkable = REPLACER_SUPPORTS_CHECKMODE in module_data
+         if REPLACER in module_data:
+             module_style = 'new'
+         elif 'from ansible.module_utils.' in module_data:
+@@ -120,7 +122,7 @@ class ModuleReplacer(object):
+         if len(snippet_names) > 0 and not 'basic' in snippet_names:
+             raise errors.AnsibleError("missing required import in %s: from ansible.module_utils.basic import *" % module_path) 
+ 
+-        return (output.getvalue(), module_style)
++        return (output.getvalue(), module_style, module_checkable)
+ 
+     # ******************************************************************************
+ 
+@@ -131,7 +133,7 @@ class ModuleReplacer(object):
+             # read in the module source
+             module_data = f.read()
+ 
+-            (module_data, module_style) = self._find_snippet_imports(module_data, module_path)
++            (module_data, module_style, module_checkable) = self._find_snippet_imports(module_data, module_path)
+ 
+             complex_args_json = utils.jsonify(complex_args)
+             # We force conversion of module_args to str because module_common calls shlex.split,
+@@ -167,5 +169,5 @@ class ModuleReplacer(object):
+                     lines[0] = shebang = "#!%s %s" % (inject[interpreter_config], " ".join(args[1:]))
+                     module_data = "\n".join(lines)
+ 
+-            return (module_data, module_style, shebang)
++            return (module_data, module_style, shebang, module_checkable)
+ 
+diff --git a/lib/ansible/runner/__init__.py b/lib/ansible/runner/__init__.py
+index 27314ed..d3e2b2c 100644
+--- a/lib/ansible/runner/__init__.py
++++ b/lib/ansible/runner/__init__.py
+@@ -396,7 +396,8 @@ class Runner(object):
+         (
+         module_style,
+         shebang,
+-        module_data
++        module_data,
++        module_checkable
+         ) = self._configure_module(conn, module_name, args, inject, complex_args)
+ 
+         # a remote tmp path may be necessary and not already created
+@@ -423,7 +424,7 @@ class Runner(object):
+         cmd = ""
+         in_data = None
+         if module_style != 'new':
+-            if 'CHECKMODE=True' in args:
++            if 'CHECKMODE=True' in args and not module_checkable:
+                 # if module isn't using AnsibleModuleCommon infrastructure we can't be certain it knows how to
+                 # do --check mode, so to be safe we will not run it.
+                 return ReturnData(conn=conn, result=dict(skipped=True, msg="cannot yet run check mode against old-style modules"))
+@@ -1044,7 +1045,8 @@ class Runner(object):
+         (
+         module_style,
+         module_shebang,
+-        module_data
++        module_data,
++        module_checkable
+         ) = self._configure_module(conn, module_name, module_args, inject, complex_args)
+         module_remote_path = os.path.join(tmp, module_name)
+         
+@@ -1064,11 +1066,11 @@ class Runner(object):
+ 
+ 
+         # insert shared code and arguments into the module
+-        (module_data, module_style, module_shebang) = module_replacer.modify_module(
++        (module_data, module_style, module_shebang, module_checkable) = module_replacer.modify_module(
+             module_path, complex_args, module_args, inject
+         )
+ 
+-        return (module_style, module_shebang, module_data)
++        return (module_style, module_shebang, module_data, module_checkable)
+ 
+ 
+     # *****************************************************
