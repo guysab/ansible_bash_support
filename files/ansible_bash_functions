@@ -50,17 +50,33 @@
 #
 #       This will format the arguments in JSON-compliant format and return it to ansible along with
 #       any stdout/stderr output already captured. Use the argument format 'name:rawvalue' to return
-#       the the specified name and value pair exactly as is (for example, to return a boolean),
-#       name="value" to return the specified bash value as a JSON string (use bash quoting rules,
-#       the helper script will convert it to JSON as appropriate), or simply 'var' to extract and
-#       return the value of an existing environment variable.
+#       the specified name and value pair exactly as is (for example, to return a boolean),
+#       name="value" to return the specified bash value as a JSON-quoted string (use bash quoting
+#       rules, the helper script will convert it to JSON as appropriate), or simply use 'var' format
+#       to return the value of an existing environment variable.
 #
 #       EXAMPLE:   string1="This string wll be returned to ansible"
 #		   ansible_return failed:false msg="File altered" string1
 #
 #             will return the following to ansible:
+#
 #                  '{"failed": false, "status": 0, "msg": "File altered", "string1": "This
 #                  string will be returned to ansible"}'
+#
+#  RETURNING COMPLEX JSON RESPONSES
+#
+#       To return complex JSON structures, use the functions json_dict() to format a dictionary (has
+#       the same arguments as ansible_return) and json_array() to format an array. Include the
+#       result of those functions in raw format to ansible_return. You may embed arrays and dicts
+#       recursively.
+#
+#       EXAMPLE:   ansible_return ansible_facts:"`json_dict factvar1 factvar2="value"`" \
+#                               mylist:"`json_array a b c d e f`"
+#
+#             will return the following to ansible:
+#
+#                      {"ansible_facts": {"factvar1": "", "factvar2": "value"}, 
+#                       "mylist": ["a", "b", "c", "d", "e", "f"]}
 #
 #---------------------------------------------------------------------------------------------------
 #% 2013-10-02 Created. [Guy Sabourin]
@@ -76,12 +92,27 @@ function json_unescape_string() {
 	sed -E 's/\\"/"/g; s#\\/#/#g; s/\\b/'$'\b''/; s/\\n/\'$'\n''/g; s/\\t/\'$'\t''/g; s/\\f/\'$'\f''/g; s/\\r/\'$'\r''/g; s/\\\\/\\/g' <<<"$*"
 }
 
-#--- json_response() - Prepare a json response ---
-function json_response() {
+#--- json_array() - Format a JSON array ---
+function json_array() {
+	local sep=''
+	echo -n "["
+	#--- Print each argument as a JSON element ---
+	for value in "$@"; do
+                #--- Quote value ---
+                echo -n "$sep\"`json_escape_string "$value"`\""
+		#--- Add a seperator for subsequent elements ---
+		sep=', '
+	done
+	#--- Close JSON reponse ---
+	echo "]"
+}
+
+#--- json_dict() - Format a JSON dictionary ---
+function json_dict() {
 	local var
 	local sep=''
 	echo -n "{"
-	#--- Print each argument to ansible_return() as a JSON element ---
+	#--- Print each argument as a JSON element ---
 	for var in "$@"; do
 		#--- var=value : String value supplied inline, escape string for JSON  ---
 		if [[ "$var" =~ ^([^=]*)=(.*)$ ]]; then
@@ -120,7 +151,7 @@ function ansible_return() {
 		[ -n "$stderr" ] && _extravars+=" stderr"
 	fi
 	#--- Return response to ansible ---
-        json_response "$@" $_extravars
+        json_dict "$@" $_extravars
 	exit 0
 }
 
